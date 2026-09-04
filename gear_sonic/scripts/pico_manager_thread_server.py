@@ -98,6 +98,11 @@ except ImportError:
     get_g1_key_frame_poses = None
 
 
+# Local patch: controller grip -> G1 wrist constant rotations (hand frame, wxyz), see patch_fixed_hand_offset.py
+FIXED_HAND_OFFSET_L = [0.694290, -0.291751, -0.409226, -0.515147]
+FIXED_HAND_OFFSET_R = [0.721548, 0.230763, -0.388356, 0.524687]
+
+
 class LocomotionMode(IntEnum):
     """Locomotion mode enum for robot movement."""
 
@@ -727,6 +732,14 @@ def get_face_buttons(reader=None):
         return False, False
 
 
+def sample_is_synthetic(reader) -> bool:
+    try:
+        s = reader.get_latest()
+        return bool(s is not None and s.get("synthetic"))
+    except Exception:
+        return False
+
+
 def get_abxy_buttons(reader=None):
     """Fetch A,B,X,Y face buttons as booleans (a,b,x,y)."""
     if isinstance(reader, _ISAAC_TELEOP_READERS):
@@ -1147,9 +1160,23 @@ class ThreePointPose:
         self._calibration_lwrist_offset = lwrist_pos_corrected - g1_lwrist_pos
         self._calibration_rwrist_offset = rwrist_pos_corrected - g1_rwrist_pos
 
+        _e = lambda r: [int(v) for v in r.as_euler("xyz", degrees=True)]
+        print(f"[{self.log_prefix}] calib orientations (robot frame, deg xyz): "
+              f"robot L {_e(g1_lwrist_rot)} R {_e(g1_rwrist_rot)} | operator L {_e(lwrist_rot_corrected)} R {_e(rwrist_rot_corrected)}", flush=True)
         # Compute orientation offsets: calibrated = rot_offset * neck_corrected
         self._calibration_lwrist_rot_offset = g1_lwrist_rot * lwrist_rot_corrected.inv()
         self._calibration_rwrist_rot_offset = g1_rwrist_rot * rwrist_rot_corrected.inv()
+        # Local patch: hand-frame (right-multiplied) offsets for controller-derived wrists.
+        # FIXED constants (measured 2026-09-04 with the operator mimicking the robot) unless
+        # SONIC_LEARN_HAND_OFFSET=1, in which case they are re-learned from the operator's hand pose at this click.
+        if os.environ.get("SONIC_FIXED_HAND_OFFSET") != "1":  # default: learn at the click (session-3 behaviour); SONIC_FIXED_HAND_OFFSET=1 uses the baked constants
+            self._calibration_lwrist_rot_offset_body = lwrist_rot_corrected.inv() * g1_lwrist_rot
+            self._calibration_rwrist_rot_offset_body = rwrist_rot_corrected.inv() * g1_rwrist_rot
+            print(f"[{self.log_prefix}] hand offsets LEARNED from this click")
+        else:
+            self._calibration_lwrist_rot_offset_body = sRot.from_quat(FIXED_HAND_OFFSET_L, scalar_first=True)
+            self._calibration_rwrist_rot_offset_body = sRot.from_quat(FIXED_HAND_OFFSET_R, scalar_first=True)
+            print(f"[{self.log_prefix}] hand offsets FIXED (controller->hand constants)")
 
         self._calibration_pending = False
         self._override_robot_q = None
@@ -1187,16 +1214,21 @@ class ThreePointPose:
             )
 
         # Wrist orientations: rot_offset * (neck_inv * current)
+        # Local patch: with body_frame_wrist_offset (controller-derived wrists) use current * offset_body
         if self._calibration_lwrist_rot_offset is not None:
             lw_corrected = calib_inv_rot * sRot.from_quat(vr_3pt_pose[0, 3:], scalar_first=True)
-            calibrated[0, 3:] = (self._calibration_lwrist_rot_offset * lw_corrected).as_quat(
-                scalar_first=True
-            )
+            if getattr(self, "body_frame_wrist_offset", False) and getattr(self, "_calibration_lwrist_rot_offset_body", None) is not None:
+                lw_cal = lw_corrected * self._calibration_lwrist_rot_offset_body
+            else:
+                lw_cal = self._calibration_lwrist_rot_offset * lw_corrected
+            calibrated[0, 3:] = lw_cal.as_quat(scalar_first=True)
         if self._calibration_rwrist_rot_offset is not None:
             rw_corrected = calib_inv_rot * sRot.from_quat(vr_3pt_pose[1, 3:], scalar_first=True)
-            calibrated[1, 3:] = (self._calibration_rwrist_rot_offset * rw_corrected).as_quat(
-                scalar_first=True
-            )
+            if getattr(self, "body_frame_wrist_offset", False) and getattr(self, "_calibration_rwrist_rot_offset_body", None) is not None:
+                rw_cal = rw_corrected * self._calibration_rwrist_rot_offset_body
+            else:
+                rw_cal = self._calibration_rwrist_rot_offset * rw_corrected
+            calibrated[1, 3:] = rw_cal.as_quat(scalar_first=True)
 
         # Neck position via kinematic chain: root → torso_link (+Z) → neck (along calibrated Z)
         neck_z = sRot.from_quat(calibrated[2, 3:], scalar_first=True).apply([0, 0, 1])
@@ -1213,6 +1245,8 @@ class ThreePointPose:
         self._calibration_rwrist_offset = None
         self._calibration_lwrist_rot_offset = None
         self._calibration_rwrist_rot_offset = None
+        self._calibration_lwrist_rot_offset_body = None
+        self._calibration_rwrist_rot_offset_body = None
         self._override_robot_q = None
 
     def reset(self) -> None:
@@ -1795,6 +1829,11 @@ class PlannerStreamer:
 
             # Read axes/joysticks to control movement, facing, speed and mode
             lx, ly, rx, ry = get_controller_axes(self.reader)
+            # Local patch: 1 Hz input telemetry so a dead stick is visible in the log
+            _now = time.monotonic()
+            if _now - getattr(self, "_axes_log_t", 0.0) >= 1.0:
+                self._axes_log_t = _now
+                print(f"[PlannerLoop] axes L=({lx:+.2f},{ly:+.2f}) R=({rx:+.2f},{ry:+.2f}) gait={self.mode.name} stream={stream_mode.name}", flush=True)
 
             # Facing from RIGHT stick: continuous yaw based on rx (right = turn right, left = turn left)
             facing = self.yaw_accumulator.update(rx, self.dt)
@@ -1843,8 +1882,14 @@ class PlannerStreamer:
             if stream_mode == StreamMode.PLANNER_VR_3PT:
                 sample = self.reader.get_latest()
                 if sample is not None:
-                    print("[PlannerLoop] Sending VR 3-point pose as target")
+                    self.three_point.body_frame_wrist_offset = bool(sample.get("synthetic", False))
                     vr_3pt_pose = self.three_point.process_smpl_pose(sample["body_poses_np"])
+                    # Local patch: 1 Hz calibrated wrist readout (robot frame, deg) to verify the axis mapping
+                    _nw = time.monotonic()
+                    if _nw - getattr(self, "_wrist_log_t", 0.0) >= 1.0:
+                        self._wrist_log_t = _nw
+                        _e = lambda q: np.round(sRot.from_quat(q, scalar_first=True).as_euler("xyz", degrees=True), 0)
+                        print(f"[PlannerLoop] wrist L pos={np.round(vr_3pt_pose[0,:3],2)} rpy={_e(vr_3pt_pose[0,3:])} | R pos={np.round(vr_3pt_pose[1,:3],2)} rpy={_e(vr_3pt_pose[1,3:])} | hand-frame={getattr(self.three_point,'body_frame_wrist_offset',None)}", flush=True)
                     vr_3pt_position = (vr_3pt_pose[:, :3].flatten()).tolist()
                     vr_3pt_orientation = vr_3pt_pose[:, 3:].flatten().tolist()
 
@@ -1990,6 +2035,10 @@ def run_pico_manager(
         prev_by_pressed = False
         prev_start_combo = False
         prev_left_axis_click = False
+        combo_down_since = None
+        stop_fired = False
+        STOP_HOLD_S = 0.4
+        combo_press_mode = StreamMode.OFF
         while True:
             # Poll Pico controller for buttons/axes
             a_pressed, b_pressed, x_pressed, y_pressed = get_abxy_buttons(reader)
@@ -2007,12 +2056,33 @@ def run_pico_manager(
             # Rising edge: A+B+X+Y pressed together -> toggle policy start/stop (planner=True)
             start_combo = (a_pressed) and (b_pressed) and (x_pressed) and (y_pressed)
 
+            # Local patch: stop needs the combo HELD for STOP_HOLD_S; start is instant.
+            if start_combo:
+                if combo_down_since is None:
+                    combo_down_since = time.monotonic()
+                    combo_press_mode = current_mode  # mode when this press began
+            else:
+                combo_down_since = None
+                stop_fired = False
+            stop_request = False
+            if (
+                start_combo
+                and combo_down_since is not None
+                and combo_press_mode != StreamMode.OFF  # a press that started the policy can't also stop it
+                and not stop_fired
+                and time.monotonic() - combo_down_since >= STOP_HOLD_S
+            ):
+                stop_request = True
+                stop_fired = True
+
             new_mode = current_mode
             if current_mode == StreamMode.OFF:
                 if start_combo and not prev_start_combo:
                     new_mode = StreamMode.PLANNER
                     # Calibrate VR 3pt tracking NOW: operator should be in zero-ref pose.
                     # Uses the current Pico SMPL frame + FK of all-zero body joints.
+                    if sample_is_synthetic(reader):
+                        input_readers.reset_synthetic_root()
                     sample = reader.get_latest()
                     if sample is not None:
                         three_point.calibrate_now(sample["body_poses_np"])
@@ -2021,7 +2091,7 @@ def run_pico_manager(
 
             elif current_mode == StreamMode.PLANNER:
                 # Chain 2: POSE <--(ax)--> PLANNER <--(left_axis_click)--> VR_3PT
-                if start_combo and not prev_start_combo:
+                if stop_request:
                     new_mode = StreamMode.OFF
                 elif ax_pressed and not prev_ax_pressed:
                     new_mode = StreamMode.POSE
@@ -2029,7 +2099,7 @@ def run_pico_manager(
                     new_mode = StreamMode.PLANNER_VR_3PT
 
             elif current_mode == StreamMode.POSE:
-                if start_combo and not prev_start_combo:
+                if stop_request:
                     new_mode = StreamMode.OFF
                 elif ax_pressed and not prev_ax_pressed:
                     new_mode = StreamMode.PLANNER  # Enter chain 2
@@ -2040,7 +2110,7 @@ def run_pico_manager(
 
             elif current_mode == StreamMode.PLANNER_FROZEN_UPPER_BODY:
                 # Chain 1: POSE <--(by)--> FROZEN <--(left_axis_click)--> VR_3PT
-                if start_combo and not prev_start_combo:
+                if stop_request:
                     new_mode = StreamMode.OFF
                 elif by_pressed and not prev_by_pressed:
                     new_mode = StreamMode.POSE
@@ -2048,7 +2118,7 @@ def run_pico_manager(
                     new_mode = StreamMode.PLANNER_VR_3PT
 
             elif current_mode == StreamMode.POSE_PAUSE:
-                if start_combo and not prev_start_combo:
+                if stop_request:
                     new_mode = StreamMode.OFF
                 elif not left_menu_button:
                     new_mode = StreamMode.POSE
@@ -2058,7 +2128,7 @@ def run_pico_manager(
                 #   left_axis_click → return to parent (PLANNER or FROZEN)
                 #   ax_pressed      → POSE (chain 2 exit)
                 #   by_pressed      → POSE (chain 1 exit)
-                if start_combo and not prev_start_combo:
+                if stop_request:
                     new_mode = StreamMode.OFF
                 elif left_axis_click and not prev_left_axis_click:
                     new_mode = vr3pt_parent_mode  # Return to parent mode
@@ -2066,6 +2136,13 @@ def run_pico_manager(
                     new_mode = StreamMode.POSE
                 elif by_pressed and not prev_by_pressed:
                     new_mode = StreamMode.POSE
+
+            # Local patch: full-body POSE mode needs real body tracking
+            if new_mode == StreamMode.POSE and new_mode != current_mode:
+                _s = reader.get_latest()
+                if _s is not None and _s.get("synthetic"):
+                    print("[Manager] synthetic body: POSE mode refused (no body tracking on this headset)")
+                    new_mode = current_mode
 
             # Handle mode transitions before running loop
             if new_mode != current_mode:
@@ -2092,6 +2169,8 @@ def run_pico_manager(
                     # (the old targets are stale after VR_3PT moved the arms)
                     planner_streamer.save_upper_body_position_target()
                 elif new_mode == StreamMode.PLANNER_VR_3PT:
+                    if sample_is_synthetic(reader):
+                        input_readers.reset_synthetic_root()
                     # Recalibrate VR tracking against the robot's actual current pose
                     # (read via g1_debug feedback + FK) to prevent sudden jumps
                     planner_streamer.recalibrate_for_vr3pt()

@@ -306,7 +306,7 @@ public:
     }
 
     // Quick helper: HOLD - hold current pose with gains (default kp=1.5, kd=0.1, dq=0, tau=0)
-    void hold(bool is_left, double kp = 1.5, double kd = 0.1)
+    void hold(bool is_left, double kp = 0.5, double kd = 0.1)
     {
         // Copy current joint positions from state under lock
         std::array<double, DEX3_MOTOR_MAX> q_current {};
@@ -336,7 +336,7 @@ public:
     }
 
     // Quick helper: CLOSE - move to mid-range pose (per Unitree example) with gains
-    void close(bool is_left, double kp = 1.5, double kd = 0.1)
+    void close(bool is_left, double kp = 0.5, double kd = 0.1)
     {
         const auto &maxLims = is_left ? MAX_LIMITS_LEFT : MAX_LIMITS_RIGHT;
         const auto &minLims = is_left ? MIN_LIMITS_LEFT : MIN_LIMITS_RIGHT;
@@ -357,7 +357,7 @@ public:
     }
 
     // Quick helper: OPEN - move to open pose using per-joint 0 with gains
-    void open(bool is_left, double kp = 1.5, double kd = 0.1)
+    void open(bool is_left, double kp = 0.5, double kd = 0.1)
     {
         HandCtx &ctx = is_left ? left_ : right_;
         unitree_hg::msg::dds_::HandCmd_ cmd; sizeCommand(cmd);
