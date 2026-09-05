@@ -98,11 +98,6 @@ except ImportError:
     get_g1_key_frame_poses = None
 
 
-# Local patch: controller grip -> G1 wrist constant rotations (hand frame, wxyz), see patch_fixed_hand_offset.py
-FIXED_HAND_OFFSET_L = [0.694290, -0.291751, -0.409226, -0.515147]
-FIXED_HAND_OFFSET_R = [0.721548, 0.230763, -0.388356, 0.524687]
-
-
 class LocomotionMode(IntEnum):
     """Locomotion mode enum for robot movement."""
 
@@ -1166,17 +1161,10 @@ class ThreePointPose:
         # Compute orientation offsets: calibrated = rot_offset * neck_corrected
         self._calibration_lwrist_rot_offset = g1_lwrist_rot * lwrist_rot_corrected.inv()
         self._calibration_rwrist_rot_offset = g1_rwrist_rot * rwrist_rot_corrected.inv()
-        # Local patch: hand-frame (right-multiplied) offsets for controller-derived wrists.
-        # FIXED constants (measured 2026-09-04 with the operator mimicking the robot) unless
-        # SONIC_LEARN_HAND_OFFSET=1, in which case they are re-learned from the operator's hand pose at this click.
-        if os.environ.get("SONIC_FIXED_HAND_OFFSET") != "1":  # default: learn at the click (session-3 behaviour); SONIC_FIXED_HAND_OFFSET=1 uses the baked constants
-            self._calibration_lwrist_rot_offset_body = lwrist_rot_corrected.inv() * g1_lwrist_rot
-            self._calibration_rwrist_rot_offset_body = rwrist_rot_corrected.inv() * g1_rwrist_rot
-            print(f"[{self.log_prefix}] hand offsets LEARNED from this click")
-        else:
-            self._calibration_lwrist_rot_offset_body = sRot.from_quat(FIXED_HAND_OFFSET_L, scalar_first=True)
-            self._calibration_rwrist_rot_offset_body = sRot.from_quat(FIXED_HAND_OFFSET_R, scalar_first=True)
-            print(f"[{self.log_prefix}] hand offsets FIXED (controller->hand constants)")
+        # Local patch: hand-frame (right-multiplied) offsets for controller-derived wrists, learned from the
+        # operator's hand pose at this click (the operator matches the robot's arms, as upstream requires).
+        self._calibration_lwrist_rot_offset_body = lwrist_rot_corrected.inv() * g1_lwrist_rot
+        self._calibration_rwrist_rot_offset_body = rwrist_rot_corrected.inv() * g1_rwrist_rot
 
         self._calibration_pending = False
         self._override_robot_q = None

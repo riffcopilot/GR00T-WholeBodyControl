@@ -349,7 +349,6 @@ _SYNTH_NECK_DROP = 0.12
 _SYNTH_ROOT_TAU = 2.0    # s, pelvis position + yaw follow the head slowly
 _SYNTH_NECK_TAU = 0.5    # s
 _SYNTH_CTRL_TAU = 0.06   # s, controller jitter filter
-_SYNTH_TORSO_FOLLOWS_HEAD = True    # True: torso turns with the head; False: torso stays on the locked heading
 _SYNTH_FILTER: dict = {}
 
 
@@ -434,7 +433,7 @@ def _synthetic_body_from_head_and_controllers(raw: dict[str, Any]) -> np.ndarray
     if f.get("root_q_locked") is None:
         f["root_q_locked"] = yaw_q.copy()
     root_q = f["root_q_locked"]
-    neck_q = _ema_q("neck_q", yaw_q, _SYNTH_NECK_TAU) if _SYNTH_TORSO_FOLLOWS_HEAD else root_q
+    neck_q = _ema_q("neck_q", yaw_q, _SYNTH_NECK_TAU)  # torso follows the head (vanilla)
     lw = np.concatenate([_ema("lw_p", lw[:3], _SYNTH_CTRL_TAU), _ema_q("lw_q", lw[3:], _SYNTH_CTRL_TAU)])
     rw = np.concatenate([_ema("rw_p", rw[:3], _SYNTH_CTRL_TAU), _ema_q("rw_q", rw[3:], _SYNTH_CTRL_TAU)])
     pelvis = np.concatenate([root_pos - np.array([0.0, _SYNTH_PELVIS_DROP, 0.0], dtype=np.float32), root_q])
