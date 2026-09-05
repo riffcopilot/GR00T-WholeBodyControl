@@ -403,6 +403,7 @@ class ElasticBand:
             self.length += 0.1
         if key == glfw.KEY_9:
             self.enable = not self.enable
+            print(f"ElasticBand enable (viewer): {self.enable}", flush=True)
 
     def handle_keyboard_button(self, key):
         if key == "9":

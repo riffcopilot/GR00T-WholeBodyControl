@@ -340,6 +340,115 @@ def _build_controller_dict(raw: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# Local patch (Physical Turing): synthetic body for headsets without body tracking
+# ---------------------------------------------------------------------------
+_SYNTH_PELVIS_DROP = 0.65   # m below the head (OpenXR y-up)
+_SYNTH_NECK_DROP = 0.12
+_SYNTH_ROOT_TAU = 2.0    # s, pelvis position + yaw follow the head slowly
+_SYNTH_NECK_TAU = 0.5    # s
+_SYNTH_CTRL_TAU = 0.06   # s, controller jitter filter
+_SYNTH_FILTER: dict = {}
+
+
+def reset_synthetic_root() -> None:
+    """Re-capture the root heading from the current head heading on the next frame (engage / VR_3PT click)."""
+    _SYNTH_FILTER.pop("root_q_locked", None)
+    _SYNTH_FILTER.pop("root_q", None)
+    logger.warning("[synthetic body] root heading will be re-captured from the head on the next frame")
+_SYNTH_LOGGED: set[str] = set()
+
+
+def _log_once(key: str, msg: str) -> None:
+    if key in _SYNTH_LOGGED:
+        return
+    _SYNTH_LOGGED.add(key)
+    logger.warning(msg)
+
+
+def _pose7(pose: Any) -> np.ndarray | None:
+    """[x,y,z,qx,qy,qz,qw] from a DeviceIO pose wrapper with .is_valid/.pose, else None."""
+    if pose is None or not getattr(pose, "is_valid", False):
+        return None
+    p = pose.pose.position
+    o = pose.pose.orientation
+    return np.array([p.x, p.y, p.z, o.x, o.y, o.z, o.w], dtype=np.float32)
+
+
+def _controller_pose7(snapshot: Any) -> np.ndarray | None:
+    if snapshot is None:
+        return None
+    for name in ("grip_pose", "aim_pose"):
+        v = _pose7(getattr(snapshot, name, None))
+        if v is not None:
+            return v
+    return None
+
+
+def _yaw_only_quat_xyzw(q_xyzw: np.ndarray) -> np.ndarray:
+    """Keep only the rotation about the vertical (y) axis of a y-up frame."""
+    from scipy.spatial.transform import Rotation as _R
+
+    fwd = _R.from_quat(q_xyzw).apply([0.0, 0.0, -1.0])
+    fwd[1] = 0.0
+    n = float(np.linalg.norm(fwd))
+    if n < 1e-3:
+        return np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)
+    fwd /= n
+    yaw = float(np.arctan2(-fwd[0], -fwd[2]))
+    return _R.from_rotvec([0.0, yaw, 0.0]).as_quat().astype(np.float32)
+
+
+def _synthetic_body_from_head_and_controllers(raw: dict[str, Any]) -> np.ndarray | None:
+    """(24, 7) body array with pelvis/neck/head derived from the headset and the
+    wrists from the controllers. Returns None until head + both controllers are valid."""
+    head = _pose7(raw.get("head"))
+    lw = _controller_pose7(raw.get("left_controller"))
+    rw = _controller_pose7(raw.get("right_controller"))
+    if head is None:
+        _log_once("head", "[synthetic body] waiting for a valid head pose")
+        return None
+    if lw is None or rw is None:
+        _log_once("ctrl", "[synthetic body] head OK, waiting for BOTH controller poses (wake the controllers)")
+        return None
+    # Low-pass the root (pelvis) hard and the neck lightly: the operator's head is NOT their pelvis.
+    # Controllers get a short EMA against tracking jitter.
+    from scipy.spatial.transform import Rotation as _R, Slerp as _Slerp
+    now = time.monotonic()
+    f = _SYNTH_FILTER
+    dt = 0.0 if f.get("t") is None else max(1e-3, now - f["t"]); f["t"] = now
+    def _ema(key, val, tau):
+        prev = f.get(key)
+        if prev is None or tau <= 0: f[key] = val; return val
+        a = 1.0 - np.exp(-dt / tau)
+        out = prev + a * (val - prev); f[key] = out; return out
+    def _ema_q(key, q, tau):
+        prev = f.get(key)
+        if prev is None or tau <= 0: f[key] = q; return q
+        a = float(1.0 - np.exp(-dt / tau))
+        r = _Slerp([0.0, 1.0], _R.from_quat([prev, q]))(a).as_quat().astype(np.float32); f[key] = r; return r
+    yaw_q = _yaw_only_quat_xyzw(head[3:])
+    root_pos = _ema("root_pos", head[:3].astype(np.float32), _SYNTH_ROOT_TAU)
+    if f.get("root_q_locked") is None:
+        f["root_q_locked"] = yaw_q.copy()
+    root_q = f["root_q_locked"]
+    neck_q = _ema_q("neck_q", yaw_q, _SYNTH_NECK_TAU)  # torso follows the head (vanilla)
+    lw = np.concatenate([_ema("lw_p", lw[:3], _SYNTH_CTRL_TAU), _ema_q("lw_q", lw[3:], _SYNTH_CTRL_TAU)])
+    rw = np.concatenate([_ema("rw_p", rw[:3], _SYNTH_CTRL_TAU), _ema_q("rw_q", rw[3:], _SYNTH_CTRL_TAU)])
+    pelvis = np.concatenate([root_pos - np.array([0.0, _SYNTH_PELVIS_DROP, 0.0], dtype=np.float32), root_q])
+    neck = np.concatenate([head[:3] - np.array([0.0, _SYNTH_NECK_DROP, 0.0], dtype=np.float32), neck_q])
+    body = np.tile(pelvis, (_NUM_BODY_JOINTS, 1)).astype(np.float32)
+    body[12] = neck
+    body[15] = head
+    body[20] = lw
+    body[22] = lw
+    body[21] = rw
+    body[23] = rw
+    _log_once("ok", "[synthetic body] streaming pelvis/neck from head + wrists from controllers (no body tracking)")
+    return body
+
+
 class IsaacTeleopReader:
     """Background reader using the in-process IsaacTeleop / CloudXR DeviceIO session.
 
@@ -448,6 +557,10 @@ class IsaacTeleopReader:
                     self._latest_controller = controller
 
             body_poses = _body_data_to_24x7(raw.get("full_body"))
+            synthetic = False
+            if body_poses is None:
+                body_poses = _synthetic_body_from_head_and_controllers(raw)
+                synthetic = body_poses is not None
             if body_poses is None:
                 if not self._unrecognised_logged and not _attr_or_item(
                     raw.get("full_body"), "joint_positions"
@@ -470,6 +583,7 @@ class IsaacTeleopReader:
 
             sample = {
                 "body_poses_np": body_poses,
+                "synthetic": synthetic,
                 "timestamp_realtime": time.time(),
                 "timestamp_monotonic": time.monotonic(),
                 "timestamp_ns": stamp_ns,
