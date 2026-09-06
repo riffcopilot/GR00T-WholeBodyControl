@@ -263,7 +263,7 @@ class GrootDataCollector:
             self._sonic_zmq_socket.connect(f"tcp://{sonic_data_zmq_host}:{sonic_data_zmq_port}")
             self._sonic_zmq_socket.setsockopt(zmq.RCVTIMEO, 100)
             self._sonic_zmq_socket.setsockopt(zmq.CONFLATE, 0)
-            self._sonic_zmq_socket.setsockopt(zmq.RCVHWM, 20)
+            self._sonic_zmq_socket.setsockopt(zmq.RCVHWM, 400)  # local patch: was 20 — grip-combo toggles were dropped on overflow
             self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "pose")
             self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "planner")
             self._sonic_zmq_socket.setsockopt_string(zmq.SUBSCRIBE, "manager_state")
@@ -339,7 +339,7 @@ class GrootDataCollector:
         if self._sonic_zmq_socket is None:
             return
 
-        max_polls = 20
+        max_polls = 400  # local patch: drain everything queued each loop (was 20)
         for _ in range(max_polls):
             try:
                 raw = self._sonic_zmq_socket.recv(zmq.NOBLOCK)

@@ -14,6 +14,15 @@ class TextToSpeech:
         except Exception as e:
             print(f"[Text To Speech] Initialization failed: {e}")
             self.engine = None
+        # Local patch: no espeak on the Thor — route cues to a shell command (the G1's own speaker).
+        import os, shlex, subprocess
+        self._say_cmd = os.environ.get("SONIC_SAY_CMD")
+        # Prefer the command whenever it is configured: pyttsx3.init() succeeds on the Thor even with no
+        # espeak binary (runAndWait then fails silently), so "engine is None" is not a usable signal.
+        if self._say_cmd:
+            self._subprocess, self._shlex = subprocess, shlex
+            self.engine = "cmd"
+            print(f"[Text To Speech] using SONIC_SAY_CMD={self._say_cmd}")
         self._speech_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
@@ -28,6 +37,13 @@ class TextToSpeech:
 
     def _say_blocking(self, message: str):
         with self._lock:
+            if self.engine == "cmd":
+                try:
+                    self._subprocess.run(self._shlex.split(self._say_cmd) + [message], timeout=8,
+                                         stdout=self._subprocess.DEVNULL, stderr=self._subprocess.DEVNULL)
+                except Exception as e:
+                    print(f"[Text To Speech] say command failed: {e}")
+                return
             try:
                 self.engine.say(message)
                 self.engine.runAndWait()
