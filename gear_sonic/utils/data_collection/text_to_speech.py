@@ -17,7 +17,9 @@ class TextToSpeech:
         # Local patch: no espeak on the Thor — route cues to a shell command (the G1's own speaker).
         import os, shlex, subprocess
         self._say_cmd = os.environ.get("SONIC_SAY_CMD")
-        if self.engine is None and self._say_cmd:
+        # Prefer the command whenever it is configured: pyttsx3.init() succeeds on the Thor even with no
+        # espeak binary (runAndWait then fails silently), so "engine is None" is not a usable signal.
+        if self._say_cmd:
             self._subprocess, self._shlex = subprocess, shlex
             self.engine = "cmd"
             print(f"[Text To Speech] using SONIC_SAY_CMD={self._say_cmd}")

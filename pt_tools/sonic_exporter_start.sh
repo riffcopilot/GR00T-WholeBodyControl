@@ -15,7 +15,7 @@ mkdir -p ~/sonic_datasets
 printf '%s' "$TASK" > ~/sonic_export.task
 printf '%s' "$NAME" > ~/sonic_export.name
 : > ~/sonic_export.log
-tmux new -d -s sonic-export "cd ~/GR00T-WholeBodyControl && source .venv_data_collection/bin/activate && export SONIC_SAY_CMD=$HOME/sonic_say.sh && python -u gear_sonic/scripts/run_data_exporter.py --task-prompt \"\$(cat $HOME/sonic_export.task)\" --dataset-name \"\$(cat $HOME/sonic_export.name)\" --root-output-dir $HOME/sonic_datasets --camera-host localhost --camera-port 5555 2>&1 | tee ~/sonic_export.log; echo EXPORT_EXIT; sleep 100000"
+tmux new -d -s sonic-export "cd ~/GR00T-WholeBodyControl && source .venv_data_collection/bin/activate && export SONIC_SAY_CMD=$HOME/sonic_say.sh && python -u gear_sonic/scripts/run_data_exporter.py --task-prompt \"\$(cat $HOME/sonic_export.task)\" --dataset-name \"\$(cat $HOME/sonic_export.name)\" --root-output-dir $HOME/sonic_datasets --camera-host localhost --camera-port 5555 2>&1 | python3 -u $HOME/sonic_ts.py | tee ~/sonic_export.log; echo EXPORT_EXIT; sleep 100000"
 # lerobot + the robot model take ~30 s to import before the first line appears
 for i in $(seq 1 90); do sleep 1; grep -aq "robot_config\|Waiting for message\|ZMQKeyboardSubscriber\|EXPORT_EXIT\|Traceback" ~/sonic_export.log 2>/dev/null && break; done
 if grep -aq "EXPORT_EXIT\|Traceback" ~/sonic_export.log; then echo "exporter FAILED:"; grep -av "^\s*$" ~/sonic_export.log | tail -5 | cut -c1-140; exit 1; fi

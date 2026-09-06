@@ -17,6 +17,9 @@ PY
 echo "== stop deploy (O -> damping)"
 tmux send-keys -t sonic-deploy O; for i in $(seq 1 20); do sleep 1; tmux capture-pane -pt sonic-deploy | grep -q "DEPLOY_EXIT" && break; done
 tmux capture-pane -pt sonic-deploy | grep -a "Stop\|DEPLOY_EXIT" | tail -2
-for s in sonic-guard sonic-go sonic-pico sonic-temps sonic-deploy; do tmux kill-session -t $s 2>/dev/null; done; sleep 3
+for s in sonic-go sonic-export sonic-keys sonic-ego sonic-cam sonic-pico sonic-cxrwd sonic-temps sonic-deploy; do tmux kill-session -t $s 2>/dev/null; done; sleep 3
+# CloudXR wss proxy + streamer survive the tmux kill — anchored kill loop (never pkill -f from an ssh one-liner)
+for p in $(pgrep -f "^python gear_sonic/scripts/pico_manager_thread_server|bin/python -c import sys, os|^python /home/physicalturing/sonic_ego_view.py|gear_sonic.camera.composed_camer[a]|gear_sonic/scripts/run_data_exporte[r]|sonic_keys_rela[y]"); do [ "$p" != "$$" ] && [ "$p" != "$PPID" ] && kill $p 2>/dev/null; done; sleep 2
+echo "CloudXR ports after shutdown: $(ss -ltn | grep -cE ":(49100|48322) ")/3 (0 = clean)"
 echo "== leftovers"; ps -eo pid,args | grep "[g]1_deploy_onnx_ref\|[p]ico_manager_thread\|[_]RUNTIME_WORKER\|[s]onic_temp_watch" | cut -c1-80
 echo "== bus after"; timeout 20 .venv_sim/bin/python ~/sonic_bus_check.py 2 2>&1 | grep "rt/lowcmd\|ROBOT\|BUS"
