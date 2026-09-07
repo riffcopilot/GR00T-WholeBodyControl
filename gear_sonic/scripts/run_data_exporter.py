@@ -329,7 +329,9 @@ class GrootDataCollector:
                 self._print_and_say("Saved episode and back to idle state", blocking=False)
         elif key == "x":
             if self._episode_state.get_state() == self._episode_state.RECORDING:
-                self.data_exporter.save_episode_as_discarded()
+                # Instant discard: the episode is deleted from disk and its index reused
+                # (was save_episode_as_discarded, which kept the files flagged in info.json).
+                self.data_exporter.discard_episode()
                 self._episode_state.reset_state()
                 self._initial_yaw = None
                 self._print_and_say("Discarded episode", blocking=False)
@@ -897,7 +899,7 @@ class GrootDataCollector:
             print("Data exporter terminated by user")
             buffer_size = self.data_exporter.episode_buffer.get("size", 0)
             if buffer_size > 0:
-                self.data_exporter.save_episode_as_discarded()
+                self.data_exporter.discard_episode()
 
         finally:
             self.save_and_cleanup()

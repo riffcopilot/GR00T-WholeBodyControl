@@ -404,8 +404,30 @@ class Gr00tDataExporter(LeRobotDataset):
             video_paths[key] = self.video_writers[key].stop()
         return video_paths
 
+    def discard_episode(self) -> None:
+        """Instant discard (Physical Turing, 2026-09-07): drop the ongoing episode entirely.
+
+        Cancels the video writers (which delete their partial mp4s), resets the frame buffer and
+        opens fresh writers on the SAME episode index — nothing is written to meta, so the dataset
+        stays contiguous and the next recording reuses the index. Unlike
+        ``save_episode_as_discarded`` nothing of the episode survives on disk.
+        """
+        for key in self.video_writers:
+            try:
+                self.video_writers[key].cancel()
+            except Exception as e:  # never let a stuck encoder wedge the discard
+                print(f"discard: cancel {key} failed: {e}")
+        idx = self.episode_buffer["episode_index"]
+        for key in self.meta.video_keys:
+            path = self.root / self.meta.get_video_file_path(idx, key)
+            if path.exists():
+                path.unlink()
+        self.episode_buffer = self.create_episode_buffer()
+        self.video_writers = self.create_video_writer()
+
     def save_episode_as_discarded(self) -> None:
-        """Flag ongoing episode as discarded and save it to disk."""
+        """Flag ongoing episode as discarded and save it to disk (NVIDIA's original discard;
+        superseded by ``discard_episode`` for the ``x`` key — kept for ``process_dataset.py``)."""
         self.meta.info["discarded_episode_indices"] = self.meta.info.get(
             "discarded_episode_indices", []
         ) + [self.episode_buffer["episode_index"]]
